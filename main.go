@@ -1,3 +1,4 @@
+// By Pegleg <pegleg@linux.com>
 package main
 
 import (
