@@ -30,6 +30,7 @@ var verbose = flag.Bool("v", false, "Print all details about the image")
 var filter = flag.Bool("filter", true, "Filters filenames that create noise such as" +
 	" node_modules. Check ignore.go file for more details")
 var extractLayers = flag.Bool("x", false, "Save layers to current directory")
+var specificVersion = flag.String("sV", "", "Set the docker client ID to a specific version -sV=1.36")
 var re *regexp.Regexp
 
 type Manifest struct {
@@ -311,11 +312,16 @@ func cleanString(str string) string {
 }
 
 func main() {
+	var cli *client.Client
+	var err error
 	flag.Parse()
 	re = regexp.MustCompile(strings.Join(InternalWordlist, "|"))
 	compile()
-	cli, err := client.NewClientWithOpts()
-	defer cli.Close()
+	if len(*specificVersion) > 0 {
+		cli, err = client.NewClientWithOpts(client.WithVersion(*specificVersion))
+	} else{
+		cli, err = client.NewClientWithOpts()
+	}
 	if err != nil {
 		color.Red(err.Error())
 		return
@@ -332,5 +338,5 @@ func main() {
 	} else {
 		analyzeMultipleImages(cli)
 	}
-
+	cli.Close()
 }

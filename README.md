@@ -26,6 +26,8 @@ Usage of ./WhaleTail:
     	File containing images to analyze seperated by line
   -filter
     	Filters filenames that create noise such as node_modules. Check ignore.go file for more details (default true)
+  -sV string
+    	Set the docker client ID to a specific version -sV=1.36
   -v	Print all details about the image
   -x	Save layers to current directory
 ```
