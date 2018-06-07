@@ -16,7 +16,7 @@ type Pattern struct {
 	Regex *regexp.Regexp
 }
 
-func compile(){
+func compileSecretPatterns(){
 	var temp []Pattern
 	if err := json.Unmarshal(patternsJson, &temp); err != nil {
 		panic(err)

@@ -98,6 +98,7 @@ func analyze(cli *client.Client, imageID string) {
 		out, err := cli.ImagePull(context.Background(), imageID, types.ImagePullOptions{})
 		if err != nil {
 			color.Red(err.Error())
+			color.Yellow("Use the -sV flag to change your client version. ./WhaleTail -sV=1.36 %s", imageID)
 			return
 		}
 		defer out.Close()
@@ -134,24 +135,33 @@ func analyzeSingleImage(cli *client.Client, imageID string) {
 
 func analyzeMultipleImages(cli *client.Client) {
 	f, _ := os.Open(*filelist)
-	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
+	var imageIDs []string
 	for scanner.Scan() {
-		analyzeSingleImage(cli, scanner.Text())
+		imageIDs = append(imageIDs, scanner.Text())
+	}
+	f.Close()
+	for _, imageID := range imageIDs{
+		analyzeSingleImage(cli, imageID)
 	}
 }
 
 func extractImageLayers(cli *client.Client, imageID string, history []dockerHist) error{
+	var startAt = 1
+	if *verbose {
+		startAt = 0
+	}
 	outputDir := filepath.Join(".", url.QueryEscape(imageID))
 	os.MkdirAll(outputDir, FilePerms)
 	f, err := os.Create(filepath.Join(outputDir, "mapping.txt"))
 	if err != nil{
 		return err
-
 	}
 	var layersToExtract = make(map[string]int)
-	for i := 1; i < len(history); i++ { //Skip the first layer as it clutters it
+
+
+	for i := startAt; i < len(history); i++ { //Skip the first layer as it clutters it
 		if strings.Contains(history[i].CreatedBy, "ADD") || strings.Contains(history[i].CreatedBy, "COPY") {
 			layersToExtract[history[i].LayerID] = 1
 			layerID := strings.Split(history[i].LayerID, "/")[0]
@@ -193,8 +203,17 @@ func extractImageLayers(cli *client.Client, imageID string, history []dockerHist
 					data := make([]byte, hdrr.Size)
 					ttr.Read(data)
 					ioutil.WriteFile(filepath.Join(outputDir, layerID, name), data, FilePerms)
-				default:
-					color.Red("Unable to determine filetype for %s", hdrr.Name)
+				case tar.TypeSymlink:
+					/*
+					Skipping Symlinks as there can be dangerous behavior here
+					dest := filepath.Join(outputDir, layerID, name)
+					source := hdrr.Linkname
+					if _, err := os.Stat(dest); !os.IsNotExist(err) {
+						color.Red("Refusing to overwrite existing file: %s", dest)
+					}else {
+						os.Symlink(source, dest)
+					}
+					*/
 				}
 			}
 
@@ -214,16 +233,16 @@ func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
 	var configs []Manifest
 	var hist []dockerHist
 	var layers = make(map[string][]string)
-	color.White("Potential secrets")
+	color.White("Potential secrets:")
 	for {
-		hdr, err := tr.Next()
+		imageFile, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		if strings.Contains(hdr.Name, ".json") && hdr.Name != "manifest.json" {
+		if strings.Contains(imageFile.Name, ".json") && imageFile.Name != "manifest.json" {
 			jsonBytes, _ := ioutil.ReadAll(tr)
 			h, _, _, _ := jsonparser.Get(jsonBytes, "history")
 			err = json.Unmarshal(h, &hist)
@@ -232,28 +251,28 @@ func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
 			}
 
 		}
-		if hdr.Name == "manifest.json" { //This file contains the sorted order of layers by the commands executed
+		if imageFile.Name == "manifest.json" { //This file contains the sorted order of layers by the commands executed
 			byteValue, _ := ioutil.ReadAll(tr)
 			err = json.Unmarshal(byteValue, &configs)
 			if err != nil {
 				return errors.New("unable to parse manifest.json")
 			}
 		}
-		if strings.Contains(hdr.Name, "layer.tar") {
+		if strings.Contains(imageFile.Name, "layer.tar") {
 			ttr := tar.NewReader(tr)
-			layers[hdr.Name] = make([]string, 0)
+			layers[imageFile.Name] = make([]string, 0)
 			for {
-				hdrr, err := ttr.Next()
+				tarLayerFile, err := ttr.Next()
 				if err == io.EOF {
 					break
 				}
 				if err != nil {
 					color.Red("%s", err)
 				}
-				layers[hdr.Name] = append(layers[hdr.Name], hdrr.Name)
-				match := re.Find([]byte(hdrr.Name))
+				layers[imageFile.Name] = append(layers[imageFile.Name], tarLayerFile.Name)
+				match := re.Find([]byte(tarLayerFile.Name))
 				if match == nil {
-					scanFilename(hdrr.Name, hdr.Name)
+					scanFilename(tarLayerFile.Name, imageFile.Name)
 				}
 
 
@@ -334,7 +353,7 @@ func main() {
 	var err error
 	flag.Parse()
 	re = regexp.MustCompile(strings.Join(InternalWordlist, "|"))
-	compile()
+	compileSecretPatterns()
 	if len(*specificVersion) > 0 {
 		cli, err = client.NewClientWithOpts(client.WithVersion(*specificVersion))
 	} else{
@@ -345,16 +364,14 @@ func main() {
 		return
 	}
 	repo := flag.Arg(0)
-	if len(repo) == 0{
-		color.Red("Please provide a repository image to analyze. ./WhaleTail nginx:latest")
-		return
-	}
-	if len(*filelist) == 0 {
+	if len(*filelist) > 0{
+		analyzeMultipleImages(cli)
+	} else if len(repo) > 0 {
 		imageID := repo
 		analyzeSingleImage(cli, imageID)
-
 	} else {
-		analyzeMultipleImages(cli)
+		color.Red("Please provide a repository image to analyze. ./WhaleTail nginx:latest")
+		return
 	}
 	cli.Close()
 }
