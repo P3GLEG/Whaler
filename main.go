@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"net/url"
 	"fmt"
+	"github.com/docker/docker/pkg/jsonmessage"
+	"github.com/docker/docker/pkg/term"
 )
 
 const FilePerms = 0700
@@ -38,6 +40,18 @@ type Manifest struct {
 	RepoTags []string `json:"RepoTags"`
 	Layers   []string `json:"Layers"`
 }
+
+type ProgressDetail struct {
+	Current int `json:"current"`
+	Total int      `json:"total"`
+}
+
+type Status struct {
+	Status string   `json:"status"`
+	ID string   `json:"id"`
+	ProgressDetail ProgressDetail `json:"progressDetail"`
+}
+
 
 type dockerHist struct {
 	Created    string `json:"created"`
@@ -77,6 +91,7 @@ func printUserInfo(info types.ImageInspect) {
 	color.White("\n")
 }
 
+
 func analyze(cli *client.Client, imageID string) {
 	info, _, err := cli.ImageInspectWithRaw(context.Background(), imageID)
 	if err != nil {
@@ -86,7 +101,10 @@ func analyze(cli *client.Client, imageID string) {
 			return
 		}
 		defer out.Close()
-		io.Copy(os.Stdout, out)
+		fd, isTerminal := term.GetFdInfo(os.Stdout)
+		if err := jsonmessage.DisplayJSONMessagesStream(out, os.Stdout, fd, isTerminal, nil); err != nil {
+			fmt.Println(err)
+		}
 		if err != nil {
 			color.Red(err.Error())
 			return
