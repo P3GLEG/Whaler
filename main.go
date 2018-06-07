@@ -98,7 +98,9 @@ func analyze(cli *client.Client, imageID string) {
 		out, err := cli.ImagePull(context.Background(), imageID, types.ImagePullOptions{})
 		if err != nil {
 			color.Red(err.Error())
-			color.Yellow("Use the -sV flag to change your client version. ./WhaleTail -sV=1.36 %s", imageID)
+			if strings.Contains(err.Error(),"Maximum supported API version is"){
+				color.Yellow("Use the -sV flag to change your client version. ./WhaleTail -sV=1.36 %s", imageID)
+			}
 			return
 		}
 		defer out.Close()
@@ -340,11 +342,16 @@ func printResults(layers []dockerHist) {
 	color.White("")
 }
 
+
 func cleanString(str string) string {
 	s := strings.Join(strings.Fields(str), " ")
-	s = strings.Replace(s, "&&", " \\\n&&", -1)
-	s = strings.Replace(s, "/bin/sh -c ", "", -1)
-	s = strings.Replace(s, "#(nop) ", "", -1)
+	s = strings.Replace(s, "&&", " \\\n\t&&", -1)
+	if !strings.HasPrefix(s, "/bin/sh -c #(nop)"){
+		s = strings.Replace(s, "/bin/sh -c ", "RUN ", -1)
+	} else {
+		s = strings.Replace(s, "/bin/sh -c ", "", -1)
+		s = strings.Replace(s, "#(nop) ", "", -1)
+	}
 	return s
 }
 
