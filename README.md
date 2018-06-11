@@ -1,7 +1,7 @@
-# WhaleTail
+# Whaler
 
 
-WhaleTail is a Go program which is designed to reverse engineer a Docker Image into the Dockerfile that created it.  It currently performs the following actions
+Whaler is a Go program which is designed to reverse engineer a Docker Image into the Dockerfile that created it.  It currently performs the following actions
 
   - Generates a Dockerfile from an Image
   - Searches added filenames for potential secret files
@@ -15,13 +15,13 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 Git clone the project into your $GOPATH/src directory and perform the following command
 ```go
 cd $GOPATH/src
-git clone https://github.com/P3GLEG/WhaleTail
+git clone https://github.com/P3GLEG/Whaler
 go build .
 ```
 ### How to run it
 ```go
-./WhaleTail
-Usage of ./WhaleTail:
+./Whaler
+Usage of ./Whaler:
   -f string
     	File containing images to analyze seperated by line
   -filter
