@@ -1,7 +1,13 @@
+<!--
+  Title: Whaler
+  Description: reverse docker images easily 
+  Author: pegleg
+  -->
+
 # Whaler
 
 
-Whaler is a Go program which is designed to reverse engineer a Docker Image into the Dockerfile that created it.  It currently performs the following actions
+Whaler is a Go program which is designed to reverse engineer docker images into the Dockerfile that created it.  It currently performs the following actions
 
   - Generates a Dockerfile from an Image
   - Searches added filenames for potential secret files
