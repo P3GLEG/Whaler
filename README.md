@@ -20,7 +20,7 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 ### How to build it
 Git clone the project into your $GOPATH/src directory and perform the following command
 ```go
-go get -u https://github.com/P3GLEG/Whaler
+go get -u github.com/P3GLEG/Whaler
 cd $GOPATH/src/github.com/P3GLEG/Whaler
 go build .
 ```
