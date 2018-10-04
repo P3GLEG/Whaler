@@ -99,7 +99,7 @@ func analyze(cli *client.Client, imageID string) {
 		if err != nil {
 			color.Red(err.Error())
 			if strings.Contains(err.Error(),"Maximum supported API version is"){
-				color.Yellow("Use the -sV flag to change your client version. ./WhaleTail -sV=1.36 %s", imageID)
+				color.Yellow("Use the -sV flag to change your client version. ./whaler -sV=1.36 %s", imageID)
 			}
 			return
 		}
@@ -377,7 +377,7 @@ func main() {
 		imageID := repo
 		analyzeSingleImage(cli, imageID)
 	} else {
-		color.Red("Please provide a repository image to analyze. ./WhaleTail nginx:latest")
+		color.Red("Please provide a repository image to analyze. ./whaler nginx:latest")
 		return
 	}
 	cli.Close()
