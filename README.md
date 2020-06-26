@@ -17,6 +17,19 @@ Whaler is a Go program which is designed to reverse engineer docker images into 
 ![alt text](https://samaritan.ai/wp-content/uploads/2018/06/Screen-Shot-2018-06-04-at-8.51.22-PM.png "Logo Title Text 1")
 
 You can read more about this on my blog [Here](https://samaritan.ai/blog/reversing-docker-images-into-dockerfiles/)
+
+### How to run it
+
+The easiest way is to run the tool in docker container:
+
+```
+docker build -t dfimage .
+alias dfimage="docker run -v /var/run/docker.sock:/var/run/docker.sock --rm dfimage"
+dfimage -sV=1.36 nginx:latest
+```
+
+This tool will pull target docker image automatically. Parameter `-sV=1.36` is not always required.
+
 ### How to build it
 Git clone the project into your $GOPATH/src directory and perform the following command
 ```go
