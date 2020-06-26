@@ -20,7 +20,7 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 
 ### How to run it
 
-This image has been pushed to `alpine/dfimage` (currently it still runs in debian)
+This image has been pushed to `alpine/dfimage`
 
 ```
 alias dfimage="docker run -v /var/run/docker.sock:/var/run/docker.sock --rm alpine/dfimage"
