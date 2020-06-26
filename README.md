@@ -20,12 +20,14 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 
 ### How to run it
 
-This image has been pushed to `alpine/dfimage`
+This tool has been pushed to docker image `alpine/dfimage`, the easiest way is to run the tool in docker container:
 
 ```
 alias dfimage="docker run -v /var/run/docker.sock:/var/run/docker.sock --rm alpine/dfimage"
 dfimage -sV=1.36 nginx:latest
 ```
+
+This tool will pull docker image automatically. Parameter `-sV=1.36` is not always required.
 
 ### How to build it
 Git clone the project into your $GOPATH/src directory and perform the following command
