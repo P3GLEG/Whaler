@@ -23,9 +23,9 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 The easiest way is to run the tool in docker container:
 
 ```
-docker build -t dfimage .
-alias dfimage="docker run -v /var/run/docker.sock:/var/run/docker.sock --rm dfimage"
-dfimage -sV=1.36 nginx:latest
+docker build --rm -t pegleg:whaler .
+alias whaler="docker run -t --rm -v /var/run/docker.sock:/var/run/docker.sock:ro pegleg:whaler"
+whaler -sV=1.36 nginx:latest
 ```
 
 This tool will pull target docker image automatically. Parameter `-sV=1.36` is not always required.
@@ -50,3 +50,4 @@ Usage of ./Whaler:
   -v	Print all details about the image
   -x	Save layers to current directory
 ```
+
