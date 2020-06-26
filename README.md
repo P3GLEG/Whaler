@@ -22,9 +22,14 @@ You can read more about this on my blog [Here](https://samaritan.ai/blog/reversi
 
 The easiest way is to run the tool in docker container:
 
+```bash
+docker pull pegleg/whaler
+docker run -t --rm -v /var/run/docker.sock:/var/run/docker.sock:ro pegleg/whaler -sV=1.36 nginx:latest
 ```
-docker build --rm -t pegleg:whaler .
-alias whaler="docker run -t --rm -v /var/run/docker.sock:/var/run/docker.sock:ro pegleg:whaler"
+
+```bash
+docker build --rm -t pegleg/whaler .
+alias whaler="docker run -t --rm -v /var/run/docker.sock:/var/run/docker.sock:ro pegleg/whaler"
 whaler -sV=1.36 nginx:latest
 ```
 
@@ -32,11 +37,12 @@ This tool will pull target docker image automatically. Parameter `-sV=1.36` is n
 
 ### How to build it
 Git clone the project into your $GOPATH/src directory and perform the following command
-```go
+```bash
 go get -u github.com/P3GLEG/Whaler
 cd $GOPATH/src/github.com/P3GLEG/Whaler
 go build .
 ```
+
 ### How to run it
 ```go
 ./Whaler
