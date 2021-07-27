@@ -14,9 +14,6 @@ Whaler is a Go program which is designed to reverse engineer docker images into 
   - Extracts files that were added by the Docker ADD/COPY Instructions
   - It also displays misc. information such as ports open, the user it runs as and environment variables. 
 
-![alt text](https://samaritan.ai/wp-content/uploads/2018/06/Screen-Shot-2018-06-04-at-8.51.22-PM.png "Logo Title Text 1")
-
-You can read more about this on my blog [Here](https://samaritan.ai/blog/reversing-docker-images-into-dockerfiles/)
 
 ### How to run it
 
