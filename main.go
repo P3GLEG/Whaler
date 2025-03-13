@@ -2,37 +2,37 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"context"
-	"flag"
-	"io"
-	"os"
-	"regexp"
-	"strings"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
-	"github.com/fatih/color"
-	"archive/tar"
-	"io/ioutil"
 	"encoding/json"
 	"errors"
-	_ "net/http/pprof"
-	"github.com/buger/jsonparser"
-	"path/filepath"
-	"net/url"
+	"flag"
 	"fmt"
+	"io"
+	_ "net/http/pprof"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/buger/jsonparser"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/docker/docker/pkg/term"
+	"github.com/fatih/color"
+	"github.com/moby/term"
 )
 
 const FilePerms = 0700
 
 var filelist = flag.String("f", "", "File containing images to analyze seperated by line")
 var verbose = flag.Bool("v", false, "Print all details about the image")
-var filter = flag.Bool("filter", true, "Filters filenames that create noise such as" +
+var filter = flag.Bool("filter", true, "Filters filenames that create noise such as"+
 	" node_modules. Check ignore.go file for more details")
 var extractLayers = flag.Bool("x", false, "Save layers to current directory")
-var specificVersion = flag.String("sV", "", "Set the docker client ID to a specific version -sV=1.36")
+var specificVersion = flag.String("sV", "", "Set the docker client ID to a specific version -sV=1.47")
 var re *regexp.Regexp
 
 type Manifest struct {
@@ -43,15 +43,14 @@ type Manifest struct {
 
 type ProgressDetail struct {
 	Current int `json:"current"`
-	Total int      `json:"total"`
+	Total   int `json:"total"`
 }
 
 type Status struct {
-	Status string   `json:"status"`
-	ID string   `json:"id"`
+	Status         string         `json:"status"`
+	ID             string         `json:"id"`
 	ProgressDetail ProgressDetail `json:"progressDetail"`
 }
-
 
 type dockerHist struct {
 	Created    string `json:"created"`
@@ -61,7 +60,14 @@ type dockerHist struct {
 	Layers     []string
 }
 
-func printEnvironmentVariables(info types.ImageInspect) {
+// DockerClient interface defines the methods we need from the Docker client
+type DockerClient interface {
+	ImageInspectWithRaw(ctx context.Context, imageID string) (image.InspectResponse, []byte, error)
+	ImageSave(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error)
+	Close() error
+}
+
+func printEnvironmentVariables(info image.InspectResponse) {
 	if len(info.Config.Env) > 0 {
 		color.White("Environment Variables")
 		for _, ele := range info.Config.Env {
@@ -71,7 +77,7 @@ func printEnvironmentVariables(info types.ImageInspect) {
 	}
 }
 
-func printPorts(info types.ImageInspect) {
+func printPorts(info image.InspectResponse) {
 	if len(info.Config.ExposedPorts) > 0 {
 		color.White("Open Ports")
 		for i := range info.Config.ExposedPorts {
@@ -81,7 +87,7 @@ func printPorts(info types.ImageInspect) {
 	}
 }
 
-func printUserInfo(info types.ImageInspect) {
+func printUserInfo(info image.InspectResponse) {
 	color.White("Image user")
 	if len(info.Config.User) == 0 {
 		color.Red("|%s", "User is root")
@@ -91,15 +97,16 @@ func printUserInfo(info types.ImageInspect) {
 	color.White("\n")
 }
 
-
-func analyze(cli *client.Client, imageID string) {
+func analyze(cli DockerClient, imageID string) {
 	info, _, err := cli.ImageInspectWithRaw(context.Background(), imageID)
 	if err != nil {
-		out, err := cli.ImagePull(context.Background(), imageID, types.ImagePullOptions{})
+		out, err := cli.ImageSave(context.Background(), []string{imageID})
 		if err != nil {
 			color.Red(err.Error())
-			if strings.Contains(err.Error(),"Maximum supported API version is"){
-				color.Yellow("Use the -sV flag to change your client version. ./whaler -sV=1.36 %s", imageID)
+			if strings.Contains(err.Error(), "Maximum supported API version is") {
+				// Extract version number from error message
+				version := strings.Split(err.Error(), "Maximum supported API version is ")[1]
+				color.Yellow("Use the -sV flag to change your client version:\n./whaler -sV=%s %s", version, imageID)
 			}
 			return
 		}
@@ -107,10 +114,6 @@ func analyze(cli *client.Client, imageID string) {
 		fd, isTerminal := term.GetFdInfo(os.Stdout)
 		if err := jsonmessage.DisplayJSONMessagesStream(out, os.Stdout, fd, isTerminal, nil); err != nil {
 			fmt.Println(err)
-		}
-		if err != nil {
-			color.Red(err.Error())
-			return
 		}
 		info, _, err = cli.ImageInspectWithRaw(context.Background(), imageID)
 		if err != nil {
@@ -128,14 +131,13 @@ func analyze(cli *client.Client, imageID string) {
 	if err != nil {
 		color.Red("%s", err)
 	}
-
 }
 
-func analyzeSingleImage(cli *client.Client, imageID string) {
+func analyzeSingleImage(cli DockerClient, imageID string) {
 	analyze(cli, imageID)
 }
 
-func analyzeMultipleImages(cli *client.Client) {
+func analyzeMultipleImages(cli DockerClient) {
 	f, _ := os.Open(*filelist)
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
@@ -144,12 +146,12 @@ func analyzeMultipleImages(cli *client.Client) {
 		imageIDs = append(imageIDs, scanner.Text())
 	}
 	f.Close()
-	for _, imageID := range imageIDs{
+	for _, imageID := range imageIDs {
 		analyzeSingleImage(cli, imageID)
 	}
 }
 
-func extractImageLayers(cli *client.Client, imageID string, history []dockerHist) error{
+func extractImageLayers(cli DockerClient, imageID string, history []dockerHist) error {
 	var startAt = 1
 	if *verbose {
 		startAt = 0
@@ -157,11 +159,10 @@ func extractImageLayers(cli *client.Client, imageID string, history []dockerHist
 	outputDir := filepath.Join(".", url.QueryEscape(imageID))
 	os.MkdirAll(outputDir, FilePerms)
 	f, err := os.Create(filepath.Join(outputDir, "mapping.txt"))
-	if err != nil{
+	if err != nil {
 		return err
 	}
 	var layersToExtract = make(map[string]int)
-
 
 	for i := startAt; i < len(history); i++ { //Skip the first layer as it clutters it
 		if strings.Contains(history[i].CreatedBy, "ADD") || strings.Contains(history[i].CreatedBy, "COPY") {
@@ -172,10 +173,10 @@ func extractImageLayers(cli *client.Client, imageID string, history []dockerHist
 	}
 	f.Close()
 	imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
-	defer imageStream.Close()
 	if err != nil {
 		return err
 	}
+	defer imageStream.Close()
 	tr := tar.NewReader(imageStream)
 	for {
 		hdr, err := tr.Next()
@@ -185,7 +186,7 @@ func extractImageLayers(cli *client.Client, imageID string, history []dockerHist
 		if err != nil {
 			return err
 		}
-		if _, ok := layersToExtract[hdr.Name]; ok{
+		if _, ok := layersToExtract[hdr.Name]; ok {
 			layerID := strings.Split(hdr.Name, "/")[0]
 			os.MkdirAll(filepath.Join(outputDir, layerID), FilePerms)
 			ttr := tar.NewReader(tr)
@@ -204,33 +205,32 @@ func extractImageLayers(cli *client.Client, imageID string, history []dockerHist
 				case tar.TypeReg:
 					data := make([]byte, hdrr.Size)
 					ttr.Read(data)
-					ioutil.WriteFile(filepath.Join(outputDir, layerID, name), data, FilePerms)
+					os.WriteFile(filepath.Join(outputDir, layerID, name), data, FilePerms)
 				case tar.TypeSymlink:
 					/*
-					Skipping Symlinks as there can be dangerous behavior here
-					dest := filepath.Join(outputDir, layerID, name)
-					source := hdrr.Linkname
-					if _, err := os.Stat(dest); !os.IsNotExist(err) {
-						color.Red("Refusing to overwrite existing file: %s", dest)
-					}else {
-						os.Symlink(source, dest)
-					}
+						Skipping Symlinks as there can be dangerous behavior here
+						dest := filepath.Join(outputDir, layerID, name)
+						source := hdrr.Linkname
+						if _, err := os.Stat(dest); !os.IsNotExist(err) {
+							color.Red("Refusing to overwrite existing file: %s", dest)
+						}else {
+							os.Symlink(source, dest)
+						}
 					*/
 				}
 			}
 
 		}
 	}
-	imageStream.Close()
 	return nil
-
 }
 
-func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
+func analyzeImageFilesystem(cli DockerClient, imageID string) error {
 	imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
 	if err != nil {
 		return err
 	}
+	defer imageStream.Close()
 	tr := tar.NewReader(imageStream)
 	var configs []Manifest
 	var hist []dockerHist
@@ -245,16 +245,16 @@ func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
 			return err
 		}
 		if strings.Contains(imageFile.Name, ".json") && imageFile.Name != "manifest.json" {
-			jsonBytes, _ := ioutil.ReadAll(tr)
+			jsonBytes, _ := io.ReadAll(tr)
 			h, _, _, _ := jsonparser.Get(jsonBytes, "history")
 			err = json.Unmarshal(h, &hist)
 			if err != nil {
-				return errors.New("unable to parse history from json file ")
+				return errors.New("unable to parse history from json file due to: " + err.Error())
 			}
 
 		}
 		if imageFile.Name == "manifest.json" { //This file contains the sorted order of layers by the commands executed
-			byteValue, _ := ioutil.ReadAll(tr)
+			byteValue, _ := io.ReadAll(tr)
 			err = json.Unmarshal(byteValue, &configs)
 			if err != nil {
 				return errors.New("unable to parse manifest.json")
@@ -277,8 +277,6 @@ func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
 					scanFilename(tarLayerFile.Name, imageFile.Name)
 				}
 
-
-
 			}
 		}
 	}
@@ -297,11 +295,10 @@ func analyzeImageFilesystem(cli *client.Client, imageID string) (error) {
 	if layerIndex != len(configs[0].Layers) {
 		return errors.New("layers should always be 1:1 with commands")
 	}
-	imageStream.Close()
 	printResults(result)
 	if *extractLayers {
 		err = extractImageLayers(cli, imageID, result)
-		if err != nil{
+		if err != nil {
 			return err
 		}
 	}
@@ -342,11 +339,10 @@ func printResults(layers []dockerHist) {
 	color.White("")
 }
 
-
 func cleanString(str string) string {
 	s := strings.Join(strings.Fields(str), " ")
-	s = strings.Replace(s, "&&", " \\\n\t&&", -1)
-	if !strings.HasPrefix(s, "/bin/sh -c #(nop)"){
+	s = strings.Replace(s, "&&", "\\\n\t&&", -1)
+	if !strings.HasPrefix(s, "/bin/sh -c #(nop)") {
 		s = strings.Replace(s, "/bin/sh -c ", "RUN ", -1)
 	} else {
 		s = strings.Replace(s, "/bin/sh -c ", "", -1)
@@ -356,14 +352,14 @@ func cleanString(str string) string {
 }
 
 func main() {
-	var cli *client.Client
+	var cli DockerClient
 	var err error
 	flag.Parse()
 	re = regexp.MustCompile(strings.Join(InternalWordlist, "|"))
 	compileSecretPatterns()
 	if len(*specificVersion) > 0 {
 		cli, err = client.NewClientWithOpts(client.WithVersion(*specificVersion))
-	} else{
+	} else {
 		cli, err = client.NewClientWithOpts()
 	}
 	if err != nil {
@@ -371,7 +367,7 @@ func main() {
 		return
 	}
 	repo := flag.Arg(0)
-	if len(*filelist) > 0{
+	if len(*filelist) > 0 {
 		analyzeMultipleImages(cli)
 	} else if len(repo) > 0 {
 		imageID := repo
