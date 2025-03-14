@@ -5,12 +5,39 @@
 *.so
 *.dylib
 
-# Test binary, build with `go test -c`
+# Test binary, built with `go test -c`
 *.test
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-.idea/
+# Dependency directories
+vendor/
 
-WhaleTail
+# Go workspace file
+go.work
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Binary output directory
+bin/
+dist/
+
+# Log files
+*.log
+
+# Environment files
+.env
+.env.local
+
+# Air live reload
+tmp/
+
+# Local development files
+*.local
+

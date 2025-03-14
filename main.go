@@ -4,9 +4,9 @@ package main
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"compress/gzip"
 
 	"github.com/buger/jsonparser"
 	"github.com/docker/docker/api/types/image"
@@ -67,6 +69,27 @@ type DockerClient interface {
 	Close() error
 }
 
+// Add these new types for OCI format
+type OCIIndex struct {
+	Manifests []OCIManifest `json:"manifests"`
+}
+
+type OCIManifest struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Size      int    `json:"size"`
+}
+
+// Add a new struct for image config
+type ImageConfig struct {
+	Config struct {
+		Env          []string               `json:"Env"`
+		ExposedPorts map[string]interface{} `json:"ExposedPorts"`
+		User         string                 `json:"User"`
+	} `json:"config"`
+	DockerVersion string `json:"docker_version"`
+}
+
 func printEnvironmentVariables(info image.InspectResponse) {
 	if len(info.Config.Env) > 0 {
 		color.White("Environment Variables")
@@ -97,6 +120,37 @@ func printUserInfo(info image.InspectResponse) {
 	color.White("\n")
 }
 
+// New helper functions for ImageConfig
+func printConfigEnvironmentVariables(env []string) {
+	if len(env) > 0 {
+		color.White("Environment Variables")
+		for _, ele := range env {
+			color.Yellow("|%s", ele)
+		}
+		color.White("\n")
+	}
+}
+
+func printConfigPorts(ports map[string]interface{}) {
+	if len(ports) > 0 {
+		color.White("Open Ports")
+		for port := range ports {
+			color.Green("|%s", strings.TrimSuffix(port, "/tcp"))
+		}
+		color.White("\n")
+	}
+}
+
+func printConfigUserInfo(user string) {
+	color.White("Image user")
+	if len(user) == 0 {
+		color.Red("|%s", "User is root")
+	} else {
+		color.Blue("|Image is running as User: %s", user)
+	}
+	color.White("\n")
+}
+
 func analyze(cli DockerClient, imageID string) {
 	info, _, err := cli.ImageInspectWithRaw(context.Background(), imageID)
 	if err != nil {
@@ -104,7 +158,6 @@ func analyze(cli DockerClient, imageID string) {
 		if err != nil {
 			color.Red(err.Error())
 			if strings.Contains(err.Error(), "Maximum supported API version is") {
-				// Extract version number from error message
 				version := strings.Split(err.Error(), "Maximum supported API version is ")[1]
 				color.Yellow("Use the -sV flag to change your client version:\n./whaler -sV=%s %s", version, imageID)
 			}
@@ -127,9 +180,24 @@ func analyze(cli DockerClient, imageID string) {
 	printEnvironmentVariables(info)
 	printPorts(info)
 	printUserInfo(info)
-	err = analyzeImageFilesystem(cli, imageID)
+
+	var result []dockerHist
+	result, err = analyzeImageFilesystem(cli, imageID)
 	if err != nil {
 		color.Red("%s", err)
+	}
+
+	if *extractLayers && result != nil {
+		imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
+		if err != nil {
+			color.Red("%s", err)
+			return
+		}
+		defer imageStream.Close()
+		err = extractImageLayers(imageStream, imageID, result)
+		if err != nil {
+			color.Red("%s", err)
+		}
 	}
 }
 
@@ -151,7 +219,7 @@ func analyzeMultipleImages(cli DockerClient) {
 	}
 }
 
-func extractImageLayers(cli DockerClient, imageID string, history []dockerHist) error {
+func extractImageLayers(imageStream io.ReadCloser, imageID string, history []dockerHist) error {
 	var startAt = 1
 	if *verbose {
 		startAt = 0
@@ -164,7 +232,7 @@ func extractImageLayers(cli DockerClient, imageID string, history []dockerHist) 
 	}
 	var layersToExtract = make(map[string]int)
 
-	for i := startAt; i < len(history); i++ { //Skip the first layer as it clutters it
+	for i := startAt; i < len(history); i++ {
 		if strings.Contains(history[i].CreatedBy, "ADD") || strings.Contains(history[i].CreatedBy, "COPY") {
 			layersToExtract[history[i].LayerID] = 1
 			layerID := strings.Split(history[i].LayerID, "/")[0]
@@ -172,11 +240,7 @@ func extractImageLayers(cli DockerClient, imageID string, history []dockerHist) 
 		}
 	}
 	f.Close()
-	imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
-	if err != nil {
-		return err
-	}
-	defer imageStream.Close()
+
 	tr := tar.NewReader(imageStream)
 	for {
 		hdr, err := tr.Next()
@@ -206,63 +270,118 @@ func extractImageLayers(cli DockerClient, imageID string, history []dockerHist) 
 					data := make([]byte, hdrr.Size)
 					ttr.Read(data)
 					os.WriteFile(filepath.Join(outputDir, layerID, name), data, FilePerms)
-				case tar.TypeSymlink:
-					/*
-						Skipping Symlinks as there can be dangerous behavior here
-						dest := filepath.Join(outputDir, layerID, name)
-						source := hdrr.Linkname
-						if _, err := os.Stat(dest); !os.IsNotExist(err) {
-							color.Red("Refusing to overwrite existing file: %s", dest)
-						}else {
-							os.Symlink(source, dest)
-						}
-					*/
 				}
 			}
-
 		}
 	}
 	return nil
 }
 
-func analyzeImageFilesystem(cli DockerClient, imageID string) error {
-	imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
-	if err != nil {
-		return err
-	}
+// Update analyzeImage to better handle OCI format secret detection
+func analyzeImage(imageStream io.ReadCloser, imageID string) ([]dockerHist, *ImageConfig, error) {
 	defer imageStream.Close()
+
 	tr := tar.NewReader(imageStream)
 	var configs []Manifest
 	var hist []dockerHist
 	var layers = make(map[string][]string)
-	color.White("Potential secrets:")
+	var isOCIFormat bool
+	var blobsFound []string
+	var secretsFound bool
+
+	var imgConfig *ImageConfig
+	var ociBlobs = make(map[string][]byte)   // Store all blobs, not just tar files
+	var ociConfigs = make(map[string][]byte) // Store config blobs specifically
+
+	// First pass to determine format and read manifests
 	for {
 		imageFile, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		if strings.Contains(imageFile.Name, ".json") && imageFile.Name != "manifest.json" {
-			jsonBytes, _ := io.ReadAll(tr)
-			h, _, _, _ := jsonparser.Get(jsonBytes, "history")
-			err = json.Unmarshal(h, &hist)
+
+		// Check if this is OCI format and collect all blobs
+		if strings.HasPrefix(imageFile.Name, "blobs/sha256/") {
+			isOCIFormat = true
+			blobName := filepath.Base(imageFile.Name)
+			blobsFound = append(blobsFound, blobName)
+
+			// Read all blob data
+			blobData, err := io.ReadAll(tr)
 			if err != nil {
-				return errors.New("unable to parse history from json file due to: " + err.Error())
+				return nil, nil, fmt.Errorf("failed to read blob data: %v", err)
 			}
 
+			// Store JSON blobs separately for config processing
+			if strings.HasSuffix(blobName, ".json") || containsJSON(blobData) {
+				ociConfigs[blobName] = blobData
+			}
+
+			// Store all non-JSON blobs for layer processing
+			if !strings.HasSuffix(blobName, ".json") {
+				ociBlobs[blobName] = blobData
+			}
+			continue
 		}
-		if imageFile.Name == "manifest.json" { //This file contains the sorted order of layers by the commands executed
-			byteValue, _ := io.ReadAll(tr)
-			err = json.Unmarshal(byteValue, &configs)
+
+		// Handle config files and history (unchanged)
+		if (!isOCIFormat && strings.Contains(imageFile.Name, ".json") && imageFile.Name != "manifest.json") ||
+			(isOCIFormat && strings.HasPrefix(imageFile.Name, "blobs/sha256/")) {
+			jsonBytes, err := io.ReadAll(tr)
 			if err != nil {
-				return errors.New("unable to parse manifest.json")
+				return nil, nil, fmt.Errorf("failed to read config file: %v", err)
+			}
+
+			// Try to get history from the JSON
+			h, dataType, _, err := jsonparser.Get(jsonBytes, "history")
+			if err == nil && dataType == jsonparser.Array {
+				if err := json.Unmarshal(h, &hist); err != nil {
+					return nil, nil, fmt.Errorf("unable to parse history from json file: %v", err)
+				}
+			}
+
+			// When handling config files, also try to parse image config
+			var cfg ImageConfig
+			if err := json.Unmarshal(jsonBytes, &cfg); err == nil {
+				imgConfig = &cfg
 			}
 		}
-		if strings.Contains(imageFile.Name, "layer.tar") {
+
+		// Handle manifest files (unchanged)
+		if imageFile.Name == "manifest.json" || imageFile.Name == "index.json" {
+			byteValue, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to read manifest file: %v", err)
+			}
+
+			if imageFile.Name == "index.json" {
+				// Handle OCI format
+				var index OCIIndex
+				if err := json.Unmarshal(byteValue, &index); err != nil {
+					return nil, nil, fmt.Errorf("unable to parse OCI index.json: %v", err)
+				}
+				// Convert OCI manifest to our format
+				configs = []Manifest{{
+					Config: strings.TrimPrefix(index.Manifests[0].Digest, "sha256:"),
+					Layers: make([]string, 0),
+				}}
+				// We'll populate the layers later from the blobs
+			} else {
+				// Handle Docker format
+				if err := json.Unmarshal(byteValue, &configs); err != nil {
+					return nil, nil, fmt.Errorf("unable to parse manifest.json: %v", err)
+				}
+			}
+		}
+
+		// Handle layer files for non-OCI format (unchanged)
+		if !isOCIFormat && strings.Contains(imageFile.Name, "layer.tar") {
+			layerName := imageFile.Name
 			ttr := tar.NewReader(tr)
-			layers[imageFile.Name] = make([]string, 0)
+			layers[layerName] = make([]string, 0)
 			for {
 				tarLayerFile, err := ttr.Next()
 				if err == io.EOF {
@@ -270,34 +389,315 @@ func analyzeImageFilesystem(cli DockerClient, imageID string) error {
 				}
 				if err != nil {
 					color.Red("%s", err)
+					continue
 				}
-				layers[imageFile.Name] = append(layers[imageFile.Name], tarLayerFile.Name)
+				layers[layerName] = append(layers[layerName], tarLayerFile.Name)
 				match := re.Find([]byte(tarLayerFile.Name))
 				if match == nil {
-					scanFilename(tarLayerFile.Name, imageFile.Name)
+					if !secretsFound {
+						color.White("Potential secrets:")
+						secretsFound = true
+					}
+					scanFilename(tarLayerFile.Name, layerName)
 				}
-
 			}
 		}
 	}
+
+	// Process all OCI blobs, attempting to treat each as a potential layer
+	if isOCIFormat {
+		color.Yellow("Processing %d OCI blobs...", len(ociBlobs))
+
+		// First, scan all blobs for secrets
+		for blobName, blobData := range ociBlobs {
+			// Try to process each blob as a potential layer
+			layerReader := bytes.NewReader(blobData)
+
+			// Try several approaches to read the blob
+			layers[blobName] = make([]string, 0)
+			var processed bool
+
+			// Approach 1: Try as plain tar
+			if !processed {
+				tarReader := tar.NewReader(layerReader)
+				if processLayerAsTar(tarReader, layers, blobName, &secretsFound) {
+					processed = true
+				}
+				layerReader.Seek(0, io.SeekStart) // Reset for next attempt
+			}
+
+			// Approach 2: Try as gzipped tar - use standard gzip package
+			if !processed {
+				gzipReader, err := gzip.NewReader(layerReader)
+				if err == nil {
+					tarReader := tar.NewReader(gzipReader)
+					if processLayerAsTar(tarReader, layers, blobName, &secretsFound) {
+						processed = true
+					}
+					gzipReader.Close()                // Make sure to close the gzip reader
+					layerReader.Seek(0, io.SeekStart) // Reset for next attempt
+				}
+			}
+
+			// Approach 3: Try as raw content for secrets
+			if !processed {
+				// Scan the raw content for secrets
+				rawContent := string(blobData)
+				lines := strings.Split(rawContent, "\n")
+				for _, line := range lines {
+					match := re.Find([]byte(line))
+					if match == nil && len(line) > 5 { // Skip very short lines
+						if !secretsFound {
+							color.White("Potential secrets:")
+							secretsFound = true
+						}
+						scanFilename(line, blobName)
+					}
+				}
+			}
+		}
+	}
+
+	// For OCI format, specifically look for config with history
+	if isOCIFormat && len(hist) == 0 {
+		color.Yellow("Looking for history in OCI config files...")
+		for blobName, jsonData := range ociConfigs {
+			// Try to extract history from each config blob
+			h, dataType, _, err := jsonparser.Get(jsonData, "history")
+			if err == nil && dataType == jsonparser.Array {
+				if err := json.Unmarshal(h, &hist); err == nil {
+					color.Yellow("Found history in %s", blobName)
+					break
+				}
+			}
+		}
+
+		// If still no history, try once more with a full JSON decode approach
+		if len(hist) == 0 {
+			for _, jsonData := range ociConfigs {
+				var configObj map[string]interface{}
+				if err := json.Unmarshal(jsonData, &configObj); err == nil {
+					if historyArr, ok := configObj["history"].([]interface{}); ok {
+						color.Yellow("Found %d history entries using alternate approach", len(historyArr))
+						// Convert to our history format
+						for _, item := range historyArr {
+							if histItem, ok := item.(map[string]interface{}); ok {
+								histEntry := dockerHist{}
+								if created, ok := histItem["created"].(string); ok {
+									histEntry.Created = created
+								}
+								if createdBy, ok := histItem["created_by"].(string); ok {
+									histEntry.CreatedBy = createdBy
+								}
+								if emptyLayer, ok := histItem["empty_layer"].(bool); ok {
+									histEntry.EmptyLayer = emptyLayer
+								}
+								hist = append(hist, histEntry)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// If we still have no history in OCI format, generate a basic one
+	if isOCIFormat && len(hist) == 0 {
+		color.Yellow("No history found in image, generating basic history")
+		// Create some placeholder history
+		hist = append(hist, dockerHist{
+			Created:   "unknown",
+			CreatedBy: "FROM base image",
+		})
+	}
+
+	// If this is OCI format, use the collected blobs
+	if isOCIFormat && len(configs) > 0 {
+		configs[0].Layers = blobsFound
+	}
+
+	// Map history to layers
 	layerIndex := 0
 	result := hist[:0]
 	for _, i := range hist {
 		if !i.EmptyLayer {
-			i.LayerID = configs[0].Layers[layerIndex]
-			i.Layers = layers[i.LayerID]
-			layerIndex++
+			if len(configs) > 0 && layerIndex < len(configs[0].Layers) {
+				layerID := configs[0].Layers[layerIndex]
+				if isOCIFormat {
+					layerID = filepath.Base(layerID)
+				}
+				i.LayerID = layerID
+				i.Layers = layers[layerID]
+				layerIndex++
+			}
 			result = append(result, i)
 		} else {
-			result = append(result, i)
+			// For OCI format, we still want to keep track of empty layers
+			if isOCIFormat {
+				result = append(result, i)
+			} else {
+				// Original behavior for non-OCI format
+				result = append(result, i)
+			}
 		}
 	}
-	if layerIndex != len(configs[0].Layers) {
-		return errors.New("layers should always be 1:1 with commands")
+
+	if isOCIFormat {
+		color.Yellow("OCI format detected:")
+		color.Yellow("Found %d history entries (%d non-empty)", len(hist), layerIndex)
+		color.Yellow("Found %d layer files", len(configs[0].Layers))
+		printResults(result)
+		return result, imgConfig, nil
 	}
+
+	if layerIndex != len(configs[0].Layers) {
+		return nil, nil, fmt.Errorf("layer mismatch: found %d layers but expected %d", layerIndex, len(configs[0].Layers))
+	}
+
 	printResults(result)
-	if *extractLayers {
-		err = extractImageLayers(cli, imageID, result)
+	return result, imgConfig, nil
+}
+
+// Helper function to check if a byte slice likely contains JSON
+func containsJSON(data []byte) bool {
+	// Simple check: if it starts with '{' and contains "config" or "history"
+	if len(data) > 0 && data[0] == '{' {
+		s := string(data[:min(200, len(data))])
+		return strings.Contains(s, "\"config\"") ||
+			strings.Contains(s, "\"history\"") ||
+			strings.Contains(s, "\"rootfs\"")
+	}
+	return false
+}
+
+// Helper for min function (needed for Go < 1.21)
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// New helper function to process a tar reader and extract layers
+func processLayerAsTar(tarReader *tar.Reader, layers map[string][]string, layerName string, secretsFound *bool) bool {
+	fileCount := 0
+
+	for {
+		fileHeader, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Not a valid tar, don't report error but return false
+			return false
+		}
+
+		fileCount++
+		layers[layerName] = append(layers[layerName], fileHeader.Name)
+
+		match := re.Find([]byte(fileHeader.Name))
+		if match == nil {
+			if !*secretsFound {
+				color.White("Potential secrets:")
+				*secretsFound = true
+			}
+			scanFilename(fileHeader.Name, layerName)
+		}
+	}
+
+	return fileCount > 0 // Return true if we processed at least one file
+}
+
+// Update analyzeImageFilesystem to handle ImageConfig
+func analyzeImageFilesystem(cli DockerClient, imageID string) ([]dockerHist, error) {
+	imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
+	if err != nil {
+		return nil, err
+	}
+
+	result, _, err := analyzeImage(imageStream, imageID)
+	if err != nil {
+		return nil, err
+	}
+
+	if *extractLayers && result != nil {
+		// Need to get a fresh stream for layer extraction
+		imageStream, err := cli.ImageSave(context.Background(), []string{imageID})
+		if err != nil {
+			return nil, err
+		}
+		defer imageStream.Close()
+
+		err = extractImageLayers(imageStream, imageID, result)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// Update analyzeFromTar to print info in the correct order
+func analyzeFromTar(tarPath string) error {
+	// Get the base name of the tar file to use as the image ID
+	imageID := filepath.Base(tarPath)
+	imageID = strings.TrimSuffix(imageID, filepath.Ext(imageID))
+
+	// Print image name first
+	color.White("Analyzing %s", imageID)
+
+	// First pass just to get the config
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("failed to open tar file: %v", err)
+	}
+
+	// In this first pass, just get config without secrets or layers analysis
+	config, err := extractImageConfig(io.NopCloser(f))
+	if err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+
+	// Print image information if available - this matches the Docker client order
+	if config != nil {
+		color.White("Docker Version: %s", config.DockerVersion)
+		color.White("GraphDriver: overlay2") // Default for tar files
+
+		if len(config.Config.Env) > 0 {
+			printConfigEnvironmentVariables(config.Config.Env)
+		}
+
+		if len(config.Config.ExposedPorts) > 0 {
+			printConfigPorts(config.Config.ExposedPorts)
+		}
+
+		printConfigUserInfo(config.Config.User)
+	}
+
+	// Second pass to do the full analysis
+	f2, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen tar file: %v", err)
+	}
+	defer f2.Close()
+
+	result, _, err := analyzeImage(io.NopCloser(f2), imageID)
+	if err != nil {
+		return err
+	}
+
+	if *extractLayers && result != nil {
+		// Need to reopen the file for layer extraction
+		extractFile, extractErr := os.Open(tarPath)
+		if extractErr != nil {
+			return fmt.Errorf("failed to reopen tar file: %v", extractErr)
+		}
+		defer extractFile.Close()
+
+		err = extractImageLayers(io.NopCloser(extractFile), imageID, result)
 		if err != nil {
 			return err
 		}
@@ -342,21 +742,92 @@ func printResults(layers []dockerHist) {
 func cleanString(str string) string {
 	s := strings.Join(strings.Fields(str), " ")
 	s = strings.Replace(s, "&&", "\\\n\t&&", -1)
-	if !strings.HasPrefix(s, "/bin/sh -c #(nop)") {
-		s = strings.Replace(s, "/bin/sh -c ", "RUN ", -1)
-	} else {
-		s = strings.Replace(s, "/bin/sh -c ", "", -1)
-		s = strings.Replace(s, "#(nop) ", "", -1)
+
+	// Handle strings that start with /bin/sh -c
+	if strings.HasPrefix(s, "/bin/sh -c ") {
+		if strings.HasPrefix(s, "/bin/sh -c #(nop)") {
+			// Non-operation commands (like LABEL, ENV, etc.)
+			s = strings.Replace(s, "/bin/sh -c ", "", -1)
+			s = strings.Replace(s, "#(nop) ", "", -1)
+		} else {
+			// RUN commands
+			s = strings.Replace(s, "/bin/sh -c ", "RUN ", -1)
+		}
 	}
+
+	// Check if the string already starts with RUN and has a duplicated /bin/sh -c
+	if strings.HasPrefix(s, "RUN /bin/sh -c ") {
+		s = strings.Replace(s, "RUN /bin/sh -c ", "RUN ", 1)
+	}
+
+	// Remove double RUN prefix if it exists
+	if strings.HasPrefix(s, "RUN RUN ") {
+		s = strings.Replace(s, "RUN RUN ", "RUN ", 1)
+	}
+
 	return s
+}
+
+// New function to just extract image config without full analysis
+func extractImageConfig(imageStream io.ReadCloser) (*ImageConfig, error) {
+	defer imageStream.Close()
+	tr := tar.NewReader(imageStream)
+	var imgConfig *ImageConfig
+	var isOCIFormat bool
+
+	for {
+		imageFile, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if this is OCI format
+		if strings.HasPrefix(imageFile.Name, "blobs/sha256/") {
+			isOCIFormat = true
+		}
+
+		// Handle config files
+		if (!isOCIFormat && strings.Contains(imageFile.Name, ".json") && imageFile.Name != "manifest.json") ||
+			(isOCIFormat && strings.HasPrefix(imageFile.Name, "blobs/sha256/")) {
+			jsonBytes, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read config file: %v", err)
+			}
+
+			// Try to parse image config
+			var cfg ImageConfig
+			if err := json.Unmarshal(jsonBytes, &cfg); err == nil {
+				imgConfig = &cfg
+				// Once we have the config, we can return
+				if imgConfig.DockerVersion != "" && len(imgConfig.Config.Env) > 0 {
+					return imgConfig, nil
+				}
+			}
+		}
+	}
+	return imgConfig, nil
 }
 
 func main() {
 	var cli DockerClient
 	var err error
+	var tarFile = flag.String("t", "", "Analyze a docker save tar file from disk")
 	flag.Parse()
 	re = regexp.MustCompile(strings.Join(InternalWordlist, "|"))
 	compileSecretPatterns()
+
+	// If tar file is specified, analyze it directly
+	if len(*tarFile) > 0 {
+		if err := analyzeFromTar(*tarFile); err != nil {
+			color.Red("Error analyzing tar file: %v", err)
+		}
+		return
+	}
+
+	// Existing Docker client logic
 	if len(*specificVersion) > 0 {
 		cli, err = client.NewClientWithOpts(client.WithVersion(*specificVersion))
 	} else {
