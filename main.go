@@ -90,38 +90,8 @@ type ImageConfig struct {
 	DockerVersion string `json:"docker_version"`
 }
 
-func printEnvironmentVariables(info image.InspectResponse) {
-	if len(info.Config.Env) > 0 {
-		color.White("Environment Variables")
-		for _, ele := range info.Config.Env {
-			color.Yellow("|%s", ele)
-		}
-		color.White("\n")
-	}
-}
-
-func printPorts(info image.InspectResponse) {
-	if len(info.Config.ExposedPorts) > 0 {
-		color.White("Open Ports")
-		for i := range info.Config.ExposedPorts {
-			color.Green("|%s", i.Port())
-		}
-		color.White("\n")
-	}
-}
-
-func printUserInfo(info image.InspectResponse) {
-	color.White("Image user")
-	if len(info.Config.User) == 0 {
-		color.Red("|%s", "User is root")
-	} else {
-		color.Blue("|Image is running as User: %s", info.Config.User)
-	}
-	color.White("\n")
-}
-
-// New helper functions for ImageConfig
-func printConfigEnvironmentVariables(env []string) {
+// Generic print function for environment variables
+func printEnvironmentVariables(env []string) {
 	if len(env) > 0 {
 		color.White("Environment Variables")
 		for _, ele := range env {
@@ -131,17 +101,48 @@ func printConfigEnvironmentVariables(env []string) {
 	}
 }
 
-func printConfigPorts(ports map[string]interface{}) {
-	if len(ports) > 0 {
-		color.White("Open Ports")
-		for port := range ports {
-			color.Green("|%s", strings.TrimSuffix(port, "/tcp"))
+// Generic print function for ports
+func printPorts(ports interface{}) {
+	if ports == nil {
+		return
+	}
+
+	color.White("Open Ports")
+
+	// Using type assertion for the known formats
+	if configPorts, ok := ports.(map[string]interface{}); ok {
+		// For ImageConfig
+		if len(configPorts) > 0 {
+			for port := range configPorts {
+				color.Green("|%s", strings.TrimSuffix(port, "/tcp"))
+			}
 		}
-		color.White("\n")
+	} else {
+		// For Docker API response, use a specialized function
+		printDockerPorts(ports)
+	}
+
+	color.White("\n")
+}
+
+// Helper function to print Docker API's ExposedPorts
+func printDockerPorts(ports interface{}) {
+	// Get all ports as strings using fmt.Sprintf
+	portMap := fmt.Sprintf("%v", ports)
+
+	// Extract port numbers from the map representation
+	re := regexp.MustCompile(`(\d+)/(tcp|udp)`)
+	matches := re.FindAllStringSubmatch(portMap, -1)
+
+	for _, match := range matches {
+		if len(match) >= 2 {
+			color.Green("|%s", match[1])
+		}
 	}
 }
 
-func printConfigUserInfo(user string) {
+// Generic print function for user info
+func printUserInfo(user string) {
 	color.White("Image user")
 	if len(user) == 0 {
 		color.Red("|%s", "User is root")
@@ -149,6 +150,23 @@ func printConfigUserInfo(user string) {
 		color.Blue("|Image is running as User: %s", user)
 	}
 	color.White("\n")
+}
+
+// Update the function that uses Docker API response
+func printImageInfo(info image.InspectResponse) {
+	printEnvironmentVariables(info.Config.Env)
+	printPorts(info.Config.ExposedPorts)
+	printUserInfo(info.Config.User)
+}
+
+// Update the function that uses image config
+func printConfigInfo(config *ImageConfig) {
+	if config == nil {
+		return
+	}
+	printEnvironmentVariables(config.Config.Env)
+	printPorts(config.Config.ExposedPorts)
+	printUserInfo(config.Config.User)
 }
 
 func analyze(cli DockerClient, imageID string) {
@@ -177,9 +195,7 @@ func analyze(cli DockerClient, imageID string) {
 	color.White("Analyzing %s", imageID)
 	color.White("Docker Version: %s", info.DockerVersion)
 	color.White("GraphDriver: %s", info.GraphDriver.Name)
-	printEnvironmentVariables(info)
-	printPorts(info)
-	printUserInfo(info)
+	printImageInfo(info)
 
 	var result []dockerHist
 	result, err = analyzeImageFilesystem(cli, imageID)
@@ -638,7 +654,7 @@ func analyzeImageFilesystem(cli DockerClient, imageID string) ([]dockerHist, err
 	return result, nil
 }
 
-// Update analyzeFromTar to print info in the correct order
+// Update analyzeFromTar to avoid opening the file multiple times
 func analyzeFromTar(tarPath string) error {
 	// Get the base name of the tar file to use as the image ID
 	imageID := filepath.Base(tarPath)
@@ -647,57 +663,37 @@ func analyzeFromTar(tarPath string) error {
 	// Print image name first
 	color.White("Analyzing %s", imageID)
 
-	// First pass just to get the config
-	f, err := os.Open(tarPath)
+	// Open the file once and use a buffer to allow multiple reads
+	tarFile, err := os.ReadFile(tarPath)
 	if err != nil {
-		return fmt.Errorf("failed to open tar file: %v", err)
+		return fmt.Errorf("failed to read tar file: %v", err)
 	}
 
-	// In this first pass, just get config without secrets or layers analysis
-	config, err := extractImageConfig(io.NopCloser(f))
+	// First pass just to get the config
+	configReader := bytes.NewReader(tarFile)
+	config, err := extractImageConfig(io.NopCloser(configReader))
 	if err != nil {
-		f.Close()
 		return err
 	}
-	f.Close()
 
 	// Print image information if available - this matches the Docker client order
 	if config != nil {
 		color.White("Docker Version: %s", config.DockerVersion)
 		color.White("GraphDriver: overlay2") // Default for tar files
-
-		if len(config.Config.Env) > 0 {
-			printConfigEnvironmentVariables(config.Config.Env)
-		}
-
-		if len(config.Config.ExposedPorts) > 0 {
-			printConfigPorts(config.Config.ExposedPorts)
-		}
-
-		printConfigUserInfo(config.Config.User)
+		printConfigInfo(config)
 	}
 
 	// Second pass to do the full analysis
-	f2, err := os.Open(tarPath)
-	if err != nil {
-		return fmt.Errorf("failed to reopen tar file: %v", err)
-	}
-	defer f2.Close()
-
-	result, _, err := analyzeImage(io.NopCloser(f2), imageID)
+	analysisReader := bytes.NewReader(tarFile)
+	result, _, err := analyzeImage(io.NopCloser(analysisReader), imageID)
 	if err != nil {
 		return err
 	}
 
+	// Only extract layers if requested
 	if *extractLayers && result != nil {
-		// Need to reopen the file for layer extraction
-		extractFile, extractErr := os.Open(tarPath)
-		if extractErr != nil {
-			return fmt.Errorf("failed to reopen tar file: %v", extractErr)
-		}
-		defer extractFile.Close()
-
-		err = extractImageLayers(io.NopCloser(extractFile), imageID, result)
+		extractReader := bytes.NewReader(tarFile)
+		err = extractImageLayers(io.NopCloser(extractReader), imageID, result)
 		if err != nil {
 			return err
 		}
