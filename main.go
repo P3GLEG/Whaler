@@ -279,13 +279,21 @@ func extractImageLayers(imageStream io.ReadCloser, imageID string, history []doc
 					color.Red("%s", err)
 				}
 				name := hdrr.Name
+				cleanPath := filepath.Clean(name)
+				absExtractDir := filepath.Join(outputDir, layerID)
+				finalPath := filepath.Join(absExtractDir, cleanPath)
+				// Ensure path is not absolute and stays within extract dir
+				if !strings.HasPrefix(finalPath, absExtractDir+string(os.PathSeparator)) && finalPath != absExtractDir {
+					color.Red("Skipping suspicious archive entry: %s", name)
+					continue
+				}
 				switch hdrr.Typeflag {
 				case tar.TypeDir:
-					os.MkdirAll(filepath.Join(outputDir, layerID, name), FilePerms)
+					os.MkdirAll(finalPath, FilePerms)
 				case tar.TypeReg:
 					data := make([]byte, hdrr.Size)
 					ttr.Read(data)
-					os.WriteFile(filepath.Join(outputDir, layerID, name), data, FilePerms)
+					os.WriteFile(finalPath, data, FilePerms)
 				}
 			}
 		}
