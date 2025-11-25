@@ -34,7 +34,6 @@ var verbose = flag.Bool("v", false, "Print all details about the image")
 var filter = flag.Bool("filter", true, "Filters filenames that create noise such as"+
 	" node_modules. Check ignore.go file for more details")
 var extractLayers = flag.Bool("x", false, "Save layers to current directory")
-var specificVersion = flag.String("sV", "", "Set the docker client ID to a specific version -sV=1.47")
 var re *regexp.Regexp
 
 type Manifest struct {
@@ -66,6 +65,7 @@ type dockerHist struct {
 type DockerClient interface {
 	ImageInspectWithRaw(ctx context.Context, imageID string) (image.InspectResponse, []byte, error)
 	ImageSave(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error)
+	ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
 	Close() error
 }
 
@@ -172,13 +172,9 @@ func printConfigInfo(config *ImageConfig) {
 func analyze(cli DockerClient, imageID string) {
 	info, _, err := cli.ImageInspectWithRaw(context.Background(), imageID)
 	if err != nil {
-		out, err := cli.ImageSave(context.Background(), []string{imageID})
+		out, err := cli.ImagePull(context.Background(), imageID, image.PullOptions{})
 		if err != nil {
 			color.Red(err.Error())
-			if strings.Contains(err.Error(), "Maximum supported API version is") {
-				version := strings.Split(err.Error(), "Maximum supported API version is ")[1]
-				color.Yellow("Use the -sV flag to change your client version:\n./whaler -sV=%s %s", version, imageID)
-			}
 			return
 		}
 		defer out.Close()
@@ -824,11 +820,7 @@ func main() {
 	}
 
 	// Existing Docker client logic
-	if len(*specificVersion) > 0 {
-		cli, err = client.NewClientWithOpts(client.WithVersion(*specificVersion))
-	} else {
-		cli, err = client.NewClientWithOpts()
-	}
+	cli, err = client.NewClientWithOpts(client.WithAPIVersionNegotiation())
 	if err != nil {
 		color.Red(err.Error())
 		return

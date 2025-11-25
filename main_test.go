@@ -18,7 +18,8 @@ import (
 type MockDockerClient struct {
 	*client.Client
 	imageInspectFunc func(ctx context.Context, imageID string) (image.InspectResponse, []byte, error)
-	imageSaveFunc    func(ctx context.Context, imageIDs []string) (io.ReadCloser, error)
+	imageSaveFunc    func(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error)
+	imagePullFunc    func(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error)
 }
 
 func (m *MockDockerClient) ImageInspectWithRaw(ctx context.Context, imageID string) (image.InspectResponse, []byte, error) {
@@ -28,9 +29,17 @@ func (m *MockDockerClient) ImageInspectWithRaw(ctx context.Context, imageID stri
 	return image.InspectResponse{}, nil, nil
 }
 
+func (m *MockDockerClient) ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error) {
+	if m.imagePullFunc != nil {
+		return m.imagePullFunc(ctx, refStr, options)
+	}
+	return nil, nil
+}
+
+
 func (m *MockDockerClient) ImageSave(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error) {
 	if m.imageSaveFunc != nil {
-		return m.imageSaveFunc(ctx, imageIDs)
+		return m.imageSaveFunc(ctx, imageIDs, options...)
 	}
 	return nil, nil
 }
@@ -81,11 +90,13 @@ func TestExtractImageLayers(t *testing.T) {
 	// Create a mock Docker client
 	mockClient := &MockDockerClient{
 		Client: &client.Client{},
-		imageSaveFunc: func(ctx context.Context, imageIDs []string) (io.ReadCloser, error) {
+		imageSaveFunc: func(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error) {
 			// Create a tar file in memory with our test data
 			pr, pw := io.Pipe()
 			go func() {
+				defer pw.Close()
 				tw := tar.NewWriter(pw)
+				defer tw.Close()
 
 				// Write a layer file
 				layerContent := "test layer content"
@@ -94,18 +105,25 @@ func TestExtractImageLayers(t *testing.T) {
 					Size: int64(len(layerContent)),
 					Mode: 0600,
 				}
-				tw.WriteHeader(header)
-				tw.Write([]byte(layerContent))
+				if err := tw.WriteHeader(header); err != nil {
+					return
+				}
+				if _, err := tw.Write([]byte(layerContent)); err != nil {
+					return
+				}
 
-				tw.Close()
-				pw.Close()
 			}()
 			return pr, nil
 		},
 	}
 
+	imageStream, err := mockClient.ImageSave(context.Background(), []string{"test-image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Test the extractImageLayers function
-	err = extractImageLayers(mockClient, "test-image", []dockerHist{
+	err = extractImageLayers(imageStream, "test-image", []dockerHist{
 		{
 			CreatedBy:  "ADD file:123 /app",
 			LayerID:    "layer1",
@@ -138,7 +156,7 @@ func TestAnalyzeImageFilesystem(t *testing.T) {
 
 	mockClient := &MockDockerClient{
 		Client: &client.Client{},
-		imageSaveFunc: func(ctx context.Context, imageIDs []string) (io.ReadCloser, error) {
+		imageSaveFunc: func(ctx context.Context, imageIDs []string, options ...client.ImageSaveOption) (io.ReadCloser, error) {
 			// Create a tar file in memory with our test data
 			pr, pw := io.Pipe()
 			go func() {
@@ -180,7 +198,7 @@ func TestAnalyzeImageFilesystem(t *testing.T) {
 		},
 	}
 
-	err := analyzeImageFilesystem(mockClient, "test-image")
+	_, err := analyzeImageFilesystem(mockClient, "test-image")
 	if err != nil {
 		t.Errorf("analyzeImageFilesystem failed: %v", err)
 	}
