@@ -45,7 +45,7 @@ go build .
 ./Whaler
 Usage of ./Whaler:
   -f string
-    	File containing images to analyze seperated by line
+    	File containing images to analyze separated by line
   -filter
     	Filters filenames that create noise such as node_modules. Check ignore.go file for more details (default true)
   -sV string
